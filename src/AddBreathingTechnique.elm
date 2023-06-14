@@ -127,7 +127,6 @@ formTypeAll =
                     acc
     in
     formTypeNext []
-        |> Debug.log "formTypeAll"
 
 
 getSubmitArgs : { record | expressionFormModel : ExpressionForm.Model, title : String } -> Maybe ( E.Breathing, String )

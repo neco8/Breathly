@@ -1,11 +1,11 @@
 module Statistics exposing (view)
 
 import Dict exposing (Dict)
+import ExpressionSerializer exposing (breathingToString)
 import Html exposing (Html, div, label, span, text)
 import Html.Attributes exposing (class)
 import Time
 import Type exposing (BreathingResult, BreathingTechnique)
-import ExpressionSerializer exposing (breathingToString)
 
 
 type alias Model model =
@@ -38,7 +38,7 @@ statisticsView { consecutivePracticeDays, mostFrequentBreathingTechnique, practi
         , cardView
             { class = class "mt-4"
             , label = "一番頻繁にやった呼吸法 title"
-            , text = Debug.toString mostFrequentBreathingTechnique.title
+            , text = mostFrequentBreathingTechnique.title
             }
         , cardView
             { class = class "mt-4"
@@ -48,7 +48,10 @@ statisticsView { consecutivePracticeDays, mostFrequentBreathingTechnique, practi
         , cardView
             { class = class "mt-4"
             , label = "トレンド"
-            , text = Debug.toString practiceTrend
+            , text =
+                String.concat <|
+                    List.map (\( a, b ) -> String.fromInt a ++ String.fromInt b) <|
+                        Dict.toList practiceTrend
             }
         ]
 
