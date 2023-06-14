@@ -1,14 +1,16 @@
-module ExpressionForm exposing (Model, Msg, breathingInputView, init, update, advancedBreathingInputView)
+module ExpressionForm exposing (Model, Msg, advancedBreathingInputView, breathingInputView, extractFinishedBreathing, init, update)
 
 import Dict exposing (Dict)
+import DropdownInput exposing (dropdownInput)
 import Expression exposing (ArithmeticOperator(..), BooleanExpr(..), BooleanOperator(..), Breathing(..), ComparisonExpr(..), ComparisonOperator(..), Duration(..), Exhale(..), Hold(..), Inhale(..), MinMaxOperator(..), Number(..), NumberExpr(..), TimeUnit(..))
 import ExpressionParser as P
 import ExpressionSerializer as S
-import Html exposing (Attribute, Html, button, div, h1, input, label, text)
-import Html.Attributes exposing (class, disabled, selected, type_, value)
-import Html.Events exposing (on, onClick, onInput, targetValue)
-import Json.Decode as Decode
+import Html exposing (Attribute, Html, button, div, input, label, text)
+import Html.Attributes exposing (class, disabled, type_, value)
+import Html.Events exposing (onClick, onInput)
+import InputEvent exposing (onEnter)
 import Parser
+import Html.Attributes exposing (id)
 
 
 flip : (a -> b -> c) -> b -> a -> c
@@ -16,77 +18,83 @@ flip f a b =
     f b a
 
 
+uncurry : (a -> b -> c) -> ( a, b ) -> c
+uncurry f ( a, b ) =
+    f a b
+
+
 type InputState
     = Inputting String
     | Ready
 
 
-type alias Model =
-    { breathing : Breathing
-    , textInputState : Dict String InputState
-    }
+type Model
+    = Editing Breathing (Dict String InputState)
+    | Edited Breathing
+
+
+extractFinishedBreathing : Model -> Maybe Breathing
+extractFinishedBreathing model =
+    case model of
+        Edited b ->
+            Just b
+
+        _ ->
+            Nothing
 
 
 type Msg
     = ChangeBreathing Breathing
     | ChangeTextInput { key : String, value : String }
     | FinishTextInput { key : String, value : Breathing }
+    | NoOp
 
 
 init : Breathing -> Model
 init breathing =
-    { breathing = breathing, textInputState = Dict.empty }
+    Edited breathing
 
 
 update : Msg -> Model -> Model
 update msg model =
     case msg of
         ChangeBreathing breathing ->
-            { model | breathing = breathing }
+            case model of
+                Editing _ dict ->
+                    Editing breathing dict
+
+                Edited _ ->
+                    Edited breathing
+
+        NoOp ->
+            model
 
         ChangeTextInput { key, value } ->
-            { model | textInputState = Dict.insert key (Inputting value) model.textInputState }
+            (\( breathing, dict ) ->
+                Editing breathing <| Dict.insert key (Inputting value) dict
+            )
+            <|
+                case model of
+                    Editing breathing dict ->
+                        ( breathing, dict )
+
+                    Edited breathing ->
+                        ( breathing, Dict.empty )
 
         FinishTextInput { key, value } ->
-            { model | breathing = value, textInputState = Dict.remove key model.textInputState }
+            case model of
+                Editing _ dict ->
+                    Dict.remove key dict
+                        |> (\d ->
+                                if Dict.isEmpty d then
+                                    Edited value
 
+                                else
+                                    Editing value d
+                           )
 
-dropdownInput : { class : Maybe (Attribute Msg), toString : value -> String, encode : value -> String, decode : String -> Maybe value, onSelect : value -> Msg, choices : List value, selected : value } -> Html Msg
-dropdownInput props =
-    let
-        optionElements =
-            List.map
-                (\choice ->
-                    Html.option
-                        [ value <| props.encode choice
-                        , if choice == props.selected then
-                            selected True
-
-                          else
-                            selected False
-                        ]
-                        [ Html.text <| props.toString choice ]
-                )
-                props.choices
-    in
-    Html.div [ Maybe.withDefault (class "") props.class ]
-        [ Html.select
-            [ on "change" <|
-                (targetValue
-                    |> Decode.andThen
-                        (\s ->
-                            case props.decode s of
-                                Just value ->
-                                    Decode.succeed <| props.onSelect value
-
-                                Nothing ->
-                                    Decode.fail "invalid value"
-                        )
-                )
-            , class "border py-2 pl-2 pr-3 rounded text-sm"
-            ]
-            optionElements
-        ]
+                Edited _ ->
+                    Edited value
 
 
 textInput : { class : Maybe (Attribute Msg), value : String, textInputState : Maybe String, onInput : String -> Msg, onFinish : String -> Maybe Msg } -> Html Msg
@@ -98,6 +106,16 @@ textInput props =
                     [ onInput props.onInput
                     , value <| Maybe.withDefault props.value props.textInputState
                     , class "border px-3 py-2 rounded border-blue-100"
+                    , onEnter
+                        { noOp = NoOp
+                        , msg =
+                            case Maybe.andThen props.onFinish props.textInputState of
+                                Just msg ->
+                                    msg
+
+                                Nothing ->
+                                    NoOp
+                        }
                     ]
                     []
             , Maybe.map
@@ -874,9 +892,23 @@ cardClass =
 
 breathingInputView : Model -> Html Msg
 breathingInputView model =
-    breathingInput "breathing" model.textInputState model.breathing
+    uncurry (breathingInput "breathing")
+        (case model of
+            Editing b d ->
+                ( d, b )
+
+            Edited b ->
+                ( Dict.empty, b )
+        )
 
 
 advancedBreathingInputView : Model -> Html Msg
 advancedBreathingInputView model =
-    advancedBreathingInput "breathing" model.textInputState model.breathing
+    uncurry (advancedBreathingInput "breathing")
+        (case model of
+            Editing b d ->
+                ( d, b )
+
+            Edited b ->
+                ( Dict.empty, b )
+        )

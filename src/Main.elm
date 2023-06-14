@@ -9,8 +9,11 @@ import Expression exposing (BooleanExpr(..), Breathing(..), ComparisonOperator(.
 import Home
 import Html exposing (b, text)
 import MinSecInput
+import NotFound
 import Routes
+import Statistics
 import Storage
+import Tab exposing (tabView)
 import Task
 import Url
 
@@ -46,6 +49,10 @@ type Msg
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
+    let
+        storageActionToCmd =
+            StorageAction >> Task.succeed >> Task.perform identity
+    in
     case msg of
         UrlChanged url ->
             ( { model | route = Routes.fromUrl url }
@@ -62,11 +69,16 @@ update msg model =
 
         HomeMsg homeMsg ->
             let
-                ( homeModel, homeCmd ) =
-                    Home.update homeMsg model.homeModel
+                ( homeModel, homeCmd, storageActions ) =
+                    Home.update model.key homeMsg model.homeModel
             in
             ( { model | homeModel = homeModel }
-            , Cmd.map HomeMsg homeCmd
+            , Cmd.batch
+                [ Cmd.map HomeMsg homeCmd
+                , storageActions
+                    |> List.map storageActionToCmd
+                    |> Cmd.batch
+                ]
             )
 
         StorageAction storageAction ->
@@ -90,7 +102,7 @@ update msg model =
             in
             ( { model | addBreathingTechniqueModel = addBreathingTechniqueModel }
             , actions
-                |> List.map (StorageAction >> Task.succeed >> Task.perform identity)
+                |> List.map storageActionToCmd
                 |> (\cs -> cs ++ [ Cmd.map AddBreathingTechniqueMsg cmd ])
                 |> Cmd.batch
             )
@@ -123,12 +135,7 @@ view : Model -> Document Msg
 view model =
     case model.route of
         Nothing ->
-            { title = "NotFound"
-            , body =
-                [ text "not found"
-                , MinSecInput.view model.minSecInputModel |> Html.map MinSecInputMsg
-                ]
-            }
+            NotFound.document
 
         Just Routes.HomeRoute ->
             { title = "Home"
@@ -139,7 +146,10 @@ view model =
 
         Just Routes.StatisticsRoute ->
             { title = "statistics"
-            , body = []
+            , body =
+                [ Statistics.view model.storage
+                , tabView
+                ]
             }
 
         Just Routes.AddBreathingTechniqueRoute ->

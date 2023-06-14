@@ -1,15 +1,17 @@
-module Breathing exposing (Model, Msg, init, subscriptions, update, view)
+module Breathing exposing (BreathingAction(..), GoToHome(..), Model, Msg, init, subscriptions, update, view)
 
 import Animator exposing (Timeline)
 import Animator.Css
 import BreathStep exposing (BreathStep(..))
+import Browser.Navigation as Navigation
 import CircleIndicator exposing (circleIndicator)
 import Color
 import Expression exposing (ArithmeticOperator(..), BooleanExpr(..), BooleanOperator(..), Breathing(..), ComparisonExpr(..), ComparisonOperator(..), Duration(..), Exhale(..), Hold(..), Inhale(..), MinMaxOperator(..), Number(..), NumberExpr(..), TimeUnit(..))
 import Html exposing (Html, button, div, h1, p, text)
 import Html.Attributes exposing (class, style)
 import Html.Events exposing (onClick)
-import String exposing (fromFloat)
+import Routes
+import Storage exposing (StorageAction)
 import Task
 import Time
 import Type exposing (BreathingResult)
@@ -72,40 +74,10 @@ getHoldDuration hold =
             duration
 
 
-isUserInteractionNeeded : Breathing -> BreathStep -> Bool
-isUserInteractionNeeded breathing breathStep =
-    case breathing of
-        Breathing inhale maybeInhold exhale maybeExhold ->
-            case breathStep of
-                Inhaling ->
-                    let
-                        duration =
-                            getInhaleDuration inhale
-                    in
-                    duration == Naturally || duration == AsLongAsPossible
-
-                InHolding ->
-                    case Maybe.map getHoldDuration maybeInhold of
-                        Nothing ->
-                            False
-
-                        Just duration ->
-                            duration == Naturally || duration == AsLongAsPossible
-
-                Exhaling ->
-                    let
-                        duration =
-                            getExhaleDuration exhale
-                    in
-                    duration == Naturally || duration == AsLongAsPossible
-
-                ExHolding ->
-                    case Maybe.map getHoldDuration maybeExhold of
-                        Nothing ->
-                            False
-
-                        Just duration ->
-                            duration == Naturally || duration == AsLongAsPossible
+type UserDuration
+    = IsUserInteractionNeeded
+    | IsNotUserInteractionNeeded Float
+    | EmptyDuration
 
 
 evaluateNumberExpr : NumberExpr -> Int -> Float
@@ -215,26 +187,27 @@ evaluateBooleanExpr booleanExpr phase =
                 (evaluateBooleanExpr rightBooleanExpr phase)
 
 
-durationToMilliseconds : Duration -> Int -> Float
+durationToMilliseconds : Duration -> Int -> UserDuration
 durationToMilliseconds duration phase =
     case duration of
         Naturally ->
-            0
+            IsUserInteractionNeeded
 
         AsLongAsPossible ->
-            0
+            IsUserInteractionNeeded
 
         NumberDuration numberExpr timeUnit ->
             let
                 number =
                     evaluateNumberExpr numberExpr phase
             in
-            case timeUnit of
-                Seconds ->
-                    number * 1000
+            IsNotUserInteractionNeeded <|
+                case timeUnit of
+                    Seconds ->
+                        number * 1000
 
-                Minutes ->
-                    number * 60 * 1000
+                    Minutes ->
+                        number * 60 * 1000
 
         ConditionalDuration booleanExpr thenDuration elseDuration ->
             if evaluateBooleanExpr booleanExpr phase then
@@ -244,8 +217,8 @@ durationToMilliseconds duration phase =
                 durationToMilliseconds elseDuration phase
 
 
-getNextTransitionTime : Breathing -> BreathStep -> Int -> Time.Posix -> Time.Posix
-getNextTransitionTime breathing breathStep currentPhase currentTime =
+millisecondFromBreathStep : Breathing -> Int -> BreathStep -> UserDuration
+millisecondFromBreathStep breathing currentPhase breathStep =
     case breathing of
         Breathing inhale maybeInhold exhale maybeExhold ->
             case breathStep of
@@ -255,20 +228,14 @@ getNextTransitionTime breathing breathStep currentPhase currentTime =
                             getInhaleDuration inhale
                     in
                     durationToMilliseconds duration currentPhase
-                        + toFloat (Time.posixToMillis currentTime)
-                        |> round
-                        |> Time.millisToPosix
 
                 InHolding ->
                     maybeInhold
                         |> Maybe.map
                             (getHoldDuration
                                 >> flip durationToMilliseconds currentPhase
-                                >> (+) (toFloat (Time.posixToMillis currentTime))
-                                >> round
-                                >> Time.millisToPosix
                             )
-                        |> Maybe.withDefault currentTime
+                        |> Maybe.withDefault EmptyDuration
 
                 Exhaling ->
                     let
@@ -276,20 +243,33 @@ getNextTransitionTime breathing breathStep currentPhase currentTime =
                             getExhaleDuration exhale
                     in
                     durationToMilliseconds duration currentPhase
-                        + toFloat (Time.posixToMillis currentTime)
-                        |> round
-                        |> Time.millisToPosix
 
                 ExHolding ->
                     maybeExhold
                         |> Maybe.map
                             (getHoldDuration
                                 >> flip durationToMilliseconds currentPhase
-                                >> (+) (toFloat (Time.posixToMillis currentTime))
-                                >> round
-                                >> Time.millisToPosix
                             )
-                        |> Maybe.withDefault currentTime
+                        |> Maybe.withDefault EmptyDuration
+
+
+getNextTransitionTime : Breathing -> BreathStep -> Int -> Time.Posix -> Time.Posix
+getNextTransitionTime breathing breathStep currentPhase currentTime =
+    millisecondFromBreathStep breathing currentPhase breathStep
+        |> (\m ->
+                case m of
+                    IsNotUserInteractionNeeded millisecond ->
+                        millisecond
+                            + toFloat (Time.posixToMillis currentTime)
+                            |> round
+                            |> Time.millisToPosix
+
+                    IsUserInteractionNeeded ->
+                        currentTime
+
+                    EmptyDuration ->
+                        currentTime
+           )
 
 
 type Msg
@@ -297,6 +277,7 @@ type Msg
     | NextBreathStep
     | AutoNextBreathStep
     | InitTimer Int Time.Posix
+    | GoToHomeMsg
 
 
 type Screen
@@ -318,10 +299,6 @@ type alias Model =
             }
     , screen : Screen
     }
-
-
-
--- 構造学習→国語の構造的読解力
 
 
 initialBreathStep : BreathStep
@@ -375,20 +352,75 @@ isBreathingFinished now timer =
         BreathingNotFinished
 
 
-andThen : (Model -> ( Model, Cmd Msg )) -> ( Model, Cmd Msg ) -> ( Model, Cmd Msg )
-andThen f ( model, cmd ) =
+andThen : (Model -> ( Model, Cmd Msg, BreathingAction )) -> ( Model, Cmd Msg, BreathingAction ) -> ( Model, Cmd Msg, BreathingAction )
+andThen f ( model, cmd, BreathingAction list goToHome ) =
     let
-        ( nextModel, nextCmd ) =
+        ( nextModel, nextCmd, BreathingAction nextList nextGoToHome ) =
             f model
     in
-    ( nextModel, Cmd.batch [ cmd, nextCmd ] )
+    ( nextModel
+    , Cmd.batch [ cmd, nextCmd ]
+    , BreathingAction (list ++ nextList) <|
+        case goToHome of
+            Just g ->
+                Just g
+
+            Nothing ->
+                nextGoToHome
+    )
 
 
-update : Msg -> Model -> ( Model, Cmd Msg )
-update msg model =
+type GoToHome
+    = GoToHome
+
+
+type BreathingAction
+    = BreathingAction (List StorageAction) (Maybe GoToHome)
+
+
+calculateNextPhase : BreathStep -> Breathing -> Int -> Int
+calculateNextPhase finishedBreathStep breathing prev =
+    let
+        isUserDurationEmpty u =
+            List.member u [ IsNotUserInteractionNeeded 0, EmptyDuration ]
+    in
+    case finishedBreathStep of
+        ExHolding ->
+            prev + 1
+
+        Exhaling ->
+            if isUserDurationEmpty (millisecondFromBreathStep breathing prev ExHolding) then
+                prev + 1
+
+            else
+                prev
+
+        InHolding ->
+            if
+                [ Exhaling, ExHolding ]
+                    |> List.all (millisecondFromBreathStep breathing prev >> isUserDurationEmpty)
+            then
+                prev + 1
+
+            else
+                prev
+
+        Inhaling ->
+            if
+                [ InHolding, Exhaling, ExHolding ]
+                    |> List.all (millisecondFromBreathStep breathing prev >> isUserDurationEmpty)
+            then
+                prev + 1
+
+            else
+                prev
+
+
+update : Navigation.Key -> Msg -> Model -> ( Model, Cmd Msg, BreathingAction )
+update key msg model =
     case msg of
         InitTimer time currentTime ->
-            ( model, Cmd.none )
+            ( model, Cmd.none, BreathingAction [] Nothing )
                 |> andThen
                     (\prev ->
                         ( { prev
@@ -402,53 +434,77 @@ update msg model =
                                     }
                           }
                         , Cmd.none
+                        , BreathingAction [] Nothing
                         )
                     )
-                |> andThen (update AutoNextBreathStep)
+                |> andThen (update key AutoNextBreathStep)
 
         _ ->
             case model.timer of
                 Nothing ->
                     -- init後必ずtimerが存在するので、ここに来ることはない
-                    ( model, Cmd.none )
+                    ( model, Cmd.none, BreathingAction [] Nothing )
 
                 Just timer ->
                     case msg of
                         InitTimer _ _ ->
-                            ( model, Cmd.none )
+                            ( model, Cmd.none, BreathingAction [] Nothing )
 
                         Tick newTime ->
+                            let
+                                isAutoNextBreathStep m =
+                                    not (millisecondFromBreathStep m.breathing m.currentPhase (Animator.current m.currentBreathStep) == IsUserInteractionNeeded)
+                                        && Time.posixToMillis newTime
+                                        >= Time.posixToMillis timer.nextTransitionAt
+
+                                autoProceedStepWhenNeeded m =
+                                    if isAutoNextBreathStep m then
+                                        update key AutoNextBreathStep m
+
+                                    else
+                                        ( m, Cmd.none, BreathingAction [] Nothing )
+                            in
                             case isBreathingFinished newTime timer of
                                 BreathingFinished ->
-                                    ( { model
-                                        | screen =
-                                            PracticeResultScreen
-                                                { breathingId = model.breathing
-                                                , seconds =
-                                                    (toFloat <| Time.posixToMillis newTime - Time.posixToMillis timer.breathingStartedAt)
-                                                        / 1000
-                                                , phases = model.currentPhase
-                                                }
-                                        , timer = Just { timer | now = newTime }
-                                      }
-                                    , Cmd.none
-                                    )
+                                    ( model, Cmd.none, BreathingAction [] Nothing )
+                                        |> andThen (\prev -> ( { prev | timer = Just { timer | now = newTime } }, Cmd.none, BreathingAction [] Nothing ))
+                                        |> andThen
+                                            (\prev ->
+                                                if
+                                                    not (millisecondFromBreathStep prev.breathing prev.currentPhase (Animator.current prev.currentBreathStep) == IsUserInteractionNeeded)
+                                                        && ((toFloat <| Time.posixToMillis newTime - Time.posixToMillis timer.nextTransitionAt) / 100 |> round |> (\s -> s == 0))
+                                                then
+                                                    update key AutoNextBreathStep prev
+
+                                                else
+                                                    ( prev, Cmd.none, BreathingAction [] Nothing )
+                                            )
+                                        |> andThen
+                                            (\prev ->
+                                                let
+                                                    result =
+                                                        { breathingId = prev.breathing
+                                                        , seconds =
+                                                            (toFloat <| Time.posixToMillis newTime - Time.posixToMillis timer.breathingStartedAt)
+                                                                / 1000
+                                                        , phases = prev.currentPhase
+                                                        }
+                                                in
+                                                ( { prev
+                                                    | screen =
+                                                        PracticeResultScreen
+                                                            result
+                                                  }
+                                                , Cmd.none
+                                                , BreathingAction [ Storage.AddBreathingResult result ] Nothing
+                                                )
+                                            )
 
                                 BreathingNotFinished ->
-                                    ( model, Cmd.none )
-                                        |> andThen (\prev -> ( { prev | timer = Just { timer | now = newTime } }, Cmd.none ))
-                                        |> andThen (\prev -> ( Animator.update newTime animator prev, Cmd.none ))
-                                        |> andThen
-                                            (if
-                                                not (isUserInteractionNeeded model.breathing (Animator.current model.currentBreathStep))
-                                                    && Time.posixToMillis newTime
-                                                    >= Time.posixToMillis timer.nextTransitionAt
-                                             then
-                                                update AutoNextBreathStep
-
-                                             else
-                                                \m -> ( m, Cmd.none )
-                                            )
+                                    ( model, Cmd.none, BreathingAction [] Nothing )
+                                        |> andThen (\prev -> ( { prev | timer = Just { timer | now = newTime } }, Cmd.none, BreathingAction [] Nothing ))
+                                        |> andThen (\prev -> ( Animator.update newTime animator prev, Cmd.none, BreathingAction [] Nothing ))
+                                        |> andThen autoProceedStepWhenNeeded
 
                         NextBreathStep ->
                             let
@@ -456,12 +512,7 @@ update msg model =
                                     getNextBreathStep <| Animator.current model.currentBreathStep
 
                                 nextPhase =
-                                    case Animator.current model.currentBreathStep of
-                                        ExHolding ->
-                                            model.currentPhase + 1
-
-                                        _ ->
-                                            model.currentPhase
+                                    calculateNextPhase (Animator.current model.currentBreathStep) model.breathing model.currentPhase
 
                                 nextTransition =
                                     getNextTransitionTime model.breathing nextBreathStep model.currentPhase timer.now
@@ -480,10 +531,17 @@ update msg model =
                                 , timer = Just { timer | nextTransitionAt = nextTransition, phaseStartedAt = timer.now }
                               }
                             , Cmd.none
+                            , BreathingAction [] Nothing
                             )
 
                         AutoNextBreathStep ->
-                            update NextBreathStep model
+                            update key NextBreathStep model
+
+                        GoToHomeMsg ->
+                            ( model
+                            , Cmd.none
+                            , BreathingAction [] <| Just GoToHome
+                            )
 
 
 practiceScreenView :
@@ -493,6 +551,7 @@ practiceScreenView :
             | breathing : Breathing
             , currentBreathStep : Timeline BreathStep
             , timer : Maybe { timer | now : Time.Posix, nextTransitionAt : Time.Posix, phaseStartedAt : Time.Posix }
+            , currentPhase : Int
         }
     -> Html Msg
 practiceScreenView colors model =
@@ -502,7 +561,7 @@ practiceScreenView colors model =
         ]
     <|
         List.filterMap identity
-            [ if isUserInteractionNeeded model.breathing (Animator.current model.currentBreathStep) then
+            [ if millisecondFromBreathStep model.breathing model.currentPhase (Animator.current model.currentBreathStep) == IsUserInteractionNeeded then
                 Just <| button [ onClick NextBreathStep ] [ text "Next Breath Step" ]
 
               else
@@ -512,21 +571,18 @@ practiceScreenView colors model =
             ]
 
 
-practiceResultScreenView : BreathingResult -> Html msg
+practiceResultScreenView : BreathingResult -> Html Msg
 practiceResultScreenView { seconds, phases } =
     let
-        -- テキストを表示する関数を定義しました。
-        textElement : String -> Html msg
+        textElement : String -> Html Msg
         textElement content =
             p [ class "text-2xl" ] [ Html.text content ]
 
-        -- 数値を表示する関数を定義しました。
-        numberElement : Float -> Html msg
+        numberElement : Float -> Html Msg
         numberElement number =
             p [ class "text-2xl font-bold text-blue-600" ] [ Html.text (String.fromFloat number) ]
 
-        -- 結果を表示する関数を定義しました。
-        resultElement : String -> Float -> Html msg
+        resultElement : String -> Float -> Html Msg
         resultElement label value =
             div [ class "flex justify-center items-center mt-4" ]
                 [ textElement (label ++ "：")
@@ -537,6 +593,11 @@ practiceResultScreenView { seconds, phases } =
         [ h1 [ class "text-4xl font-bold text-center" ] [ Html.text "練習結果" ]
         , resultElement "何秒呼吸をしたか" seconds
         , resultElement "何フェーズ呼吸をしたか" <| toFloat phases
+        , button
+            [ onClick GoToHomeMsg
+            , class "bg-blue-500 text-white px-4 py-2 rounded-md shadow font-bold font-main"
+            ]
+            [ text "戻る" ]
         ]
 
 

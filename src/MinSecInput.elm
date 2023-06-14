@@ -3,6 +3,7 @@ port module MinSecInput exposing (Model, Msg, init, toSeconds, update, view)
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
+import InputEvent exposing (onEnter)
 import Json.Decode
 
 
@@ -124,8 +125,8 @@ update msg (Model model) =
             )
 
 
-view : Model -> Html Msg
-view (Model model) =
+view : { tagger : Msg -> msg, onFinish : Maybe msg } -> Model -> Html msg
+view { tagger, onFinish } (Model model) =
     let
         minute =
             model.time |> inputStateToMaybe |> Maybe.map (\time -> time // 100)
@@ -160,31 +161,34 @@ view (Model model) =
             , class "opacity-0 w-0 h-0 p-0"
             , type_ "text"
             , value <| Maybe.withDefault "" (Maybe.map String.fromInt <| inputStateToMaybe model.time)
-            , onInput UpdateTime
-            , onBlur BlurInput
-            , preventDefaultOn "compositionstart" (Json.Decode.succeed ( NoOp, True ))
+            , onInput (tagger << UpdateTime)
+            , onBlur (tagger BlurInput)
+            , preventDefaultOn "compositionstart" (Json.Decode.succeed ( tagger NoOp, True ))
+            , onEnter
+                { noOp = NoOp |> tagger, msg = Maybe.withDefault (tagger NoOp) onFinish }
             ]
             []
-        , div
-            (List.filterMap identity
-                [ Just <| class "text-right rounded-md pl-4 pr-3 py-2 grid grid-cols-[auto,auto,auto,auto] place-content-end items-baseline gap-1"
-                , case model.time of
-                    Selected _ ->
-                        Just <| class "bg-gray-100"
+        , Html.map tagger <|
+            div
+                (List.filterMap identity
+                    [ Just <| class "text-right rounded-md pl-4 pr-3 py-2 grid grid-cols-[auto,auto,auto,auto] place-content-end items-baseline gap-1"
+                    , case model.time of
+                        Selected _ ->
+                            Just <| class "bg-gray-100"
 
-                    Inputting _ ->
-                        Nothing
+                        Inputting _ ->
+                            Nothing
 
-                    Ready ->
-                        Nothing
-                , Just <| onClick (SelectInput minSecInputId)
+                        Ready ->
+                            Nothing
+                    , Just <| onClick (SelectInput minSecInputId)
+                    ]
+                )
+                [ div [ class "text-xl font-bold text-black" ] [ text (format minute) ]
+                , div [ class "text-sm text-gray-300" ] [ text "m" ]
+                , div [ class "text-xl font-bold text-black" ] [ text (format second) ]
+                , div [ class "text-sm text-gray-300" ] [ text "s" ]
                 ]
-            )
-            [ div [ class "text-xl font-bold text-black" ] [ text (format minute) ]
-            , div [ class "text-sm text-gray-300" ] [ text "m" ]
-            , div [ class "text-xl font-bold text-black" ] [ text (format second) ]
-            , div [ class "text-sm text-gray-300" ] [ text "s" ]
-            ]
         ]
 
 
