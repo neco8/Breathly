@@ -34,7 +34,7 @@ export default defineConfig({
             "type": "image/png",
             "purpose": "any maskable"
           }
-        ]
+        ],
         display: "standalone",
         background_color: "#ffffff",
       },
